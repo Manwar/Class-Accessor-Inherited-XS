@@ -20,10 +20,10 @@ XSLoader::load('Class::Accessor::Inherited::XS', $VERSION);
 
         if (my $inherited = $opts{inherited}) {
             if (ref($inherited) eq 'HASH') {
-                mk_inherited_accessor($class, $_, $inherited->{$_}) for keys %$inherited;
+                mk_inherited_accessor($class, $_, $inherited->{$_}, $opts{optimize}) for keys %$inherited;
 
             } elsif (ref($inherited) eq 'ARRAY') {
-                mk_inherited_accessor($class, $_, $_) for @$inherited;
+                mk_inherited_accessor($class, $_, $_, $opts{optimize}) for @$inherited;
 
             } else {
                 warn "Can't understand format for inherited accessors initializer for class $class";
@@ -44,9 +44,9 @@ XSLoader::load('Class::Accessor::Inherited::XS', $VERSION);
     }
 
     sub mk_inherited_accessor {
-        my($class, $name, $field) = @_;
+        my($class, $name, $field, $optimize) = @_;
 
-        Class::Accessor::Inherited::XS::install_inherited_accessor("${class}::${name}", $field);
+        Class::Accessor::Inherited::XS::install_inherited_accessor("${class}::${name}", $field, $optimize);
     }
 }
 
