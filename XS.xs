@@ -13,7 +13,7 @@ static MGVTBL sv_payload_marker;
 XS(CAIXS_inherited_accessor);
 
 static void
-CAIXS_install_accessor(pTHX_ SV* full_name, SV* hash_key)
+CAIXS_install_accessor(pTHX_ SV* full_name, SV* hash_key, bool optimize_hard)
 {
     STRLEN len;
 
@@ -36,6 +36,10 @@ CAIXS_install_accessor(pTHX_ SV* full_name, SV* hash_key)
         DHEK_FLAGS(hent) = HVhek_UTF8;
     } else {
         DHEK_FLAGS(hent) = 0;
+    }
+
+    if (optimize_hard) {
+        DHEK_FLAGS(hent) |= HVhek_OPTIMIZE;
     }
 
     MAGIC* mg = sv_magicext((SV*)cv, keysv, PERL_MAGIC_ext, &sv_payload_marker, NULL, 0);
@@ -86,6 +90,7 @@ XS(CAIXS_inherited_accessor)
     // Can't find in object, so try self package
 
     HV* stash;
+    bool need_setter = false;
     if (SvROK(self)) {
         stash = SvSTASH(SvRV(self));
 
@@ -94,10 +99,13 @@ XS(CAIXS_inherited_accessor)
         if (!acc_gv) croak("Can't have pkg accessor in anon sub");
         stash = GvSTASH(acc_gv);
 
-        const char* stash_name = HvNAME(stash);
-        const char* self_name = SvPV_nolen(self);
-        if (strcmp(stash_name, self_name) != 0) {
-            stash = gv_stashsv(self, (items > 1) ? GV_ADD : 1);
+        if (items > 1 || !DHEK_OPTIMIZE(hent)) {
+            const char* stash_name = HvNAME(stash);
+            const char* self_name = SvPV_nolen(self);
+            if (strcmp(stash_name, self_name) != 0) {
+                stash = gv_stashsv(self, (items > 1) ? GV_ADD : 1);
+                need_setter = true;
+            }
         }
     }
 
@@ -105,11 +113,14 @@ XS(CAIXS_inherited_accessor)
     if (items > 1) {
         SV* orig_value = ST(1);
 
-        //SV* acc_fullname = newSVpvf("%s::%"SVf, HvNAME(stash), acc);
-        //CAIXS_install_accessor(aTHX_ c_acc_name, c_acc_name);
-
         if (!stash) {
             croak("Couldn't add stash for package setter");
+        }
+
+        if (UNLIKELY(need_setter && DHEK_OPTIMIZE(hent))) {
+            SV* acc_fullname = sv_2mortal(newSVpvf("%s::%s", HvNAME(stash), DHEK_KEY(hent)));
+            SV* key_name = sv_2mortal(newSVpvn(DHEK_KEY(hent), DHEK_LEN(hent)));
+            CAIXS_install_accessor(aTHX_ acc_fullname, key_name, DHEK_OPTIMIZE(hent) ? 1 : 0);
         }
 
         svp = CAIXS_FETCH_PKG_HEK(stash, hent);
@@ -172,10 +183,14 @@ MODULE = Class::Accessor::Inherited::XS		PACKAGE = Class::Accessor::Inherited::X
 PROTOTYPES: DISABLE
 
 void
-install_inherited_accessor(SV* full_name, SV* hash_key)
+install_inherited_accessor(SV* full_name, SV* hash_key, ...)
 PPCODE: 
 {
-    CAIXS_install_accessor(aTHX_ full_name, hash_key);
+    bool optimize_hard = false;
+    if (items >= 3) {
+        optimize_hard = SvTRUE_NN(ST(2));
+    }
+    CAIXS_install_accessor(aTHX_ full_name, hash_key, optimize_hard);
     XSRETURN_UNDEF;
 }
 

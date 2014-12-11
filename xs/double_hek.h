@@ -10,6 +10,8 @@ typedef struct double_hek {
     char buffer[4]; /* CAIXS_PKG_PREFIX, key, zero byte, flags */
 } double_hek;
 
+#define HVhek_OPTIMIZE (HVhek_UTF8 << 1)
+
 #define DHEK_HASH(hent) \
     (hent->hek_hash)
 
@@ -33,6 +35,9 @@ typedef struct double_hek {
 
 #define DHEK_UTF8(hent) \
     (DHEK_FLAGS(hent) & HVhek_UTF8)
+
+#define DHEK_OPTIMIZE(hent) \
+    (DHEK_FLAGS(hent) & HVhek_OPTIMIZE)
 
 #define CAIXS_FETCH_PKG_HEK(hv, hent) \
     CAIXS_HASH_FETCH(hv, DHEK_PKG_KEY(hent), DHEK_PKG_LEN(hent), DHEK_PKG_HASH(hent), DHEK_UTF8(hent))
