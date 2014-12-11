@@ -90,7 +90,7 @@ XS(CAIXS_inherited_accessor)
     // Can't find in object, so try self package
 
     HV* stash;
-    bool need_setter = false;
+    bool need_setter = 0;
     if (SvROK(self)) {
         stash = SvSTASH(SvRV(self));
 
@@ -104,7 +104,7 @@ XS(CAIXS_inherited_accessor)
             const char* self_name = SvPV_nolen(self);
             if (strcmp(stash_name, self_name) != 0) {
                 stash = gv_stashsv(self, (items > 1) ? GV_ADD : 1);
-                need_setter = true;
+                need_setter = 1;
             }
         }
     }
@@ -186,7 +186,7 @@ void
 install_inherited_accessor(SV* full_name, SV* hash_key, ...)
 PPCODE: 
 {
-    bool optimize_hard = false;
+    bool optimize_hard = 0;
     if (items >= 3) {
         optimize_hard = SvTRUE_NN(ST(2));
     }

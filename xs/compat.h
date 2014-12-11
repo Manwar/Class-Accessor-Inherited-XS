@@ -14,4 +14,8 @@
 #define gv_init_pvn(gv, stash, name, len, flags) gv_init(gv, stash, name, len, 0)
 #endif
 
+#ifndef SvTRUE_NN
+#define SvTRUE_NN SvTRUE
+#endif
+
 #endif
