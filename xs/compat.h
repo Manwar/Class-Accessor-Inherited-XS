@@ -20,4 +20,13 @@
 #define av_extend_guts(hv, idx, max, alloc, array) Perl_av_extend_guts(aTHX_ hv, idx, max, alloc, array)
 #endif
 
+#ifndef hv_storehek
+#define hv_storehek(hv, hek, val) \
+    hv_common((hv), NULL, HEK_KEY(hek), HEK_LEN(hek), HEK_UTF8(hek),    \
+            HV_FETCH_ISSTORE|HV_FETCH_JUST_SV, (val), HEK_HASH(hek))
 #endif
+
+#define hv_fetchhek_ent(hv, hek) \
+    ((HE *) hv_common((hv), NULL, HEK_KEY(hek), HEK_LEN(hek), HEK_UTF8(hek), 0, NULL, HEK_HASH(hek)))
+
+#endif /* __INHERITED_XS_COMPAT_H_ */

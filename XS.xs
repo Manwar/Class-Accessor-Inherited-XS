@@ -15,7 +15,109 @@ static bool optimize_entersub = 1;
 typedef struct shared_keys {
     SV* hash_key;
     SV* pkg_key;
+    HV* stash_cache;
 } shared_keys;
+#define SHARED_LAST_IDX 2
+
+static GV*
+init_storage_glob(pTHX_ HV* stash, shared_keys* keys) {
+    HE* hent = hv_fetch_ent(stash, keys->pkg_key, 0, 0);
+    GV* glob = hent ? (GV*)HeVAL(hent) : NULL;
+
+    if (!glob || !isGV(glob) || SvFAKE(glob)) {
+        if (!glob) glob = (GV*)newSV(0);
+
+        gv_init_sv(glob, stash, keys->pkg_key, 0);
+
+        if (hent) {
+            /* Not sure when this can happen - remains untested */
+            SvREFCNT_inc_simple_NN((SV*)glob);
+            SvREFCNT_dec_NN(HeVAL(hent));
+            HeVAL(hent) = (SV*)glob;
+
+        } else {
+            if (!hv_store_ent(stash, keys->pkg_key, (SV*)glob, 0)) {
+                SvREFCNT_dec_NN(glob);
+                croak("Can't add a glob to package");
+            }
+        }
+    }
+
+    /* gv_SVadd + set magic here or in reset_stash_cache ? */
+
+    return glob;
+}
+
+static GV*
+update_cache(pTHX_ SV* self, HV* cache) {
+    HV* stash;
+    if (SvROK(self)) {
+        stash = SvSTASH(SvRV(self));
+    } else {
+        stash = gv_stashsv(self, GV_ADD);
+    }
+
+    assert(stash);
+    AV* supers = mro_get_linear_isa(stash);
+    /*
+        First entry in 'mro_get_linear_isa' list is a 'stash' itself. It's already been tested
+        (otherwise we won't be here), so ajust counter and iterator to skip over it.
+    */
+    SSize_t supers_fill = AvFILLp(supers);
+    SV** supers_list    = AvARRAY(supers);
+
+    SV* cached_glob;
+    while (--supers_fill >= 0) {
+        SV* elem = *(++supers_list);
+
+        if (elem) {
+            HE* hent = hv_fetch_ent(cache, elem, 0, 0);
+            assert(hent); /* cache is correctly filled */
+
+            cached_glob = HeVAL(hent);
+            if (cached_glob != &PL_sv_undef) break;
+        }
+    }
+
+    assert(cached_glob != &PL_sv_undef);
+
+    /* and now travel supers list back and write glob to cache, including skipped entry */
+
+    return (GV*)cached_glob;
+}
+
+static GV*
+reset_stash_cache(pTHX_ HV* stash, shared_keys* keys) {
+    HV* cache = keys->stash_cache;
+
+    GV* base_glob = init_storage_glob(aTHX_ stash, keys);
+    if (!GvSV(base_glob)) gv_SVadd(base_glob); /* it also needs magic */
+
+    HE* hent = hv_fetchhek_ent(PL_isarev, HvENAME_HEK_NN(stash));
+    if (!hent) return base_glob;
+
+    HV* isarev   = (HV*)HeVAL(hent);
+    STRLEN hvmax = HvMAX(isarev);
+    HE** hvarr   = HvARRAY(isarev);
+
+    if (!hvarr) return base_glob;
+
+    for (STRLEN i = 0; i <= hvmax; ++i) {
+        HE* entry;
+        for (entry = hvarr[i]; entry; entry = HeNEXT(entry)) {
+            HEK* hek = HeKEY_hek(entry);
+            HV* stash = gv_stashpvn(HEK_KEY(hek), HEK_LEN(hek), HEK_UTF8(hek) | GV_ADD);
+
+            /* result is ignored, this call is just to set magic on GvSV, if it's not */
+            init_storage_glob(aTHX_ stash, keys);
+
+            /* PL_sv_undef is a placeholder meaning 'walk mro and recalculate cache' */
+            hv_storehek(cache, HvENAME_HEK_NN(stash), &PL_sv_undef);
+        }
+    }
+
+    return base_glob;
+}
 
 XS(CAIXS_inherited_accessor);
 
@@ -38,11 +140,12 @@ CAIXS_install_accessor(pTHX_ SV* full_name, SV* hash_key, SV* pkg_key)
     /*
         This is a pristine AV, so skip as much checks as possible on whichever perls we can grab it.
     */
-    av_extend_guts(keys_av, 1, &AvMAX(keys_av), &AvALLOC(keys_av), &AvARRAY(keys_av));
+    av_extend_guts(keys_av, SHARED_LAST_IDX, &AvMAX(keys_av), &AvALLOC(keys_av), &AvARRAY(keys_av));
+    AvFILLp(keys_av) = SHARED_LAST_IDX;
     SV** keys_array = AvARRAY(keys_av);
     keys_array[0] = s_hash_key;
     keys_array[1] = s_pkg_key;
-    AvFILLp(keys_av) = 1;
+    keys_array[2] = (SV*)newHV();
 
 #ifndef MULTIPLICITY
     CvXSUBANY(cv).any_ptr = (void*)keys_array;
@@ -136,82 +239,69 @@ XS(CAIXS_inherited_accessor)
 
     /* Couldn't find value in object, so initiate a package lookup. */
 
-    HV* stash;
-    if (SvROK(self)) {
-        stash = SvSTASH(SvRV(self));
-
-    } else {
+    HV* cache = keys->stash_cache;
+    if (!HvARRAY(cache)) {
         GV* acc_gv = CvGV(cv);
         if (!acc_gv) croak("Can't have pkg accessor in anon sub");
-        stash = GvSTASH(acc_gv);
+        HV* stash = GvSTASH(acc_gv);
 
-        const char* stash_name = HvNAME(stash);
-        const char* self_name = SvPV_nolen(self);
-        if (strcmp(stash_name, self_name) != 0) {
-            stash = gv_stashsv(self, GV_ADD);
-            if (!stash) croak("Couldn't get required stash");
-        }
+        GV* base_glob = reset_stash_cache(aTHX_ stash, keys);
+        SvREFCNT_inc_simple_NN(base_glob);
+        hv_storehek(cache, HvENAME_HEK_NN(stash), (SV*)base_glob);
     }
 
-    HE* hent;
-    if (items > 1) {
-        hent = hv_fetch_ent(stash, keys->pkg_key, 0, 0);
-        GV* glob = hent ? (GV*)HeVAL(hent) : NULL;
-        if (!glob || !isGV(glob) || SvFAKE(glob)) {
-            if (!glob) glob = (GV*)newSV(0);
+    assert(SvROK(self) || SvPOK(self));
 
-            gv_init_sv(glob, stash, keys->pkg_key, 0);
+    if (items == 1) {
+        /* must ensure that the glob hasn't been stolen and replaced with something new */
 
-            if (hent) {
-                /* Not sure when this can happen - remains untested */
-                SvREFCNT_inc_simple_NN((SV*)glob);
-                SvREFCNT_dec_NN(HeVAL(hent));
-                HeVAL(hent) = (SV*)glob;
-            } else {
-                if (!hv_store_ent(stash, keys->pkg_key, (SV*)glob, 0)) {
-                    SvREFCNT_dec_NN(glob);
-                    croak("Can't add a glob to package");
-                }
-            }
+        HE* hent;
+        if (SvROK(self)) {
+            HV* stash = SvSTASH(SvRV(self));
+            hent = hv_fetchhek_ent(cache, HvENAME_HEK_NN(stash));
+
+        } else {
+            hent = hv_fetch_ent(cache, self, 0, 0);
         }
 
-        SV* new_value = GvSVn(glob);
-        sv_setsv(new_value, ST(1));
-        PUSHs(new_value);
+        assert(hent);
+        GV* glob_or_fake = (GV*)HeVAL(hent);
 
+        if (glob_or_fake == (GV*)&PL_sv_undef) {
+            glob_or_fake = update_cache(aTHX_ self, cache);
+        }
+
+        assert(GvSV(glob_or_fake));
+        SV* value = GvSV(glob_or_fake);
+
+        /* use ST(0) instead of all PUSHs ? */
+        PUSHs(value);
         XSRETURN(1);
     }
-    
-    #define TRY_FETCH_PKG_VALUE(stash, keys, hent)                      \
-    if (stash && (hent = hv_fetch_ent(stash, keys->pkg_key, 0, 0))) {   \
-        SV* sv = GvSV(HeVAL(hent));                                     \
-        if (sv && SvOK(sv)) {                                           \
-            PUSHs(sv);                                                  \
-            XSRETURN(1);                                                \
-        }                                                               \
+
+    /* set logic */
+    HV* stash = SvROK(self) ? SvSTASH(SvRV(self)) : gv_stashsv(self, GV_ADD);
+
+    GV* glob = reset_stash_cache(aTHX_ stash, keys);
+    SV* value = ST(1);
+
+    if (!SvOK(value)) {
+        PUSHs(value);
+        /* but if it's root stash - should update cache */
+        /* always update underlying glob */
+        /* and no need to reset cache, if new == old ? at least, for undefs ? */
+
+    } else {
+        hv_storehek(cache, HvENAME_HEK_NN(stash), (SV*)glob);
+        SvREFCNT_inc_simple_NN(glob);
+
+        /* use just GvSV, as it'd be prepared for us by init_storage_glob */
+        SV* new_value = GvSVn(glob);
+        sv_setsv(new_value, value);
+        PUSHs(new_value);
     }
 
-    TRY_FETCH_PKG_VALUE(stash, keys, hent);
-
-    AV* supers = mro_get_linear_isa(stash);
-    /*
-        First entry in 'mro_get_linear_isa' list is a 'stash' itself.
-        It's already been tested, so ajust counter and iterator to skip over it.
-    */
-    SSize_t fill     = AvFILLp(supers);
-    SV** supers_list = AvARRAY(supers);
-
-    SV* elem;
-    while (--fill >= 0) {
-        elem = *(++supers_list);
-
-        if (elem) {
-            stash = gv_stashsv(elem, 0);
-            TRY_FETCH_PKG_VALUE(stash, keys, hent);
-        }
-    }
-
-    XSRETURN_UNDEF;
+    XSRETURN(1);
 }
 
 MODULE = Class::Accessor::Inherited::XS		PACKAGE = Class::Accessor::Inherited::XS
