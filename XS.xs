@@ -67,7 +67,7 @@ update_cache(pTHX_ SV* self, HV* cache) {
     SSize_t processed   = supers_fill;
     SV** supers_list    = AvARRAY(supers);
 
-    assert(supers_fill > 0); /* if it's zero, than we're in a base accessor class and glob got replaced with placeholder */
+    assert(supers_fill > 0); /* if it's zero, than we're in a base accessor class and glob got replaced with a placeholder */
 
     SV* cached_glob;
     while (--processed >= 0) {
@@ -82,7 +82,7 @@ update_cache(pTHX_ SV* self, HV* cache) {
         }
     }
 
-    assert(cached_glob != &PL_sv_undef); /* eventually found smth, at least glob in a base accessor class */
+    assert(cached_glob != &PL_sv_undef); /* eventually found smth, at least glob from the base accessor class */
 
     /*
         Now travel supers list back and write glob to cache, including first element (stash).
@@ -317,7 +317,6 @@ XS(CAIXS_inherited_accessor)
         assert(GvSV(glob_or_fake));
         SV* new_value = GvSV(glob_or_fake);
 
-        /* use ST(0) instead of all PUSHs ? */
         PUSHs(new_value);
         XSRETURN(1);
     }
