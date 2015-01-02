@@ -120,6 +120,10 @@ reset_stash_cache(pTHX_ HV* stash, shared_keys* keys) {
 
     if (!hvarr) return base_glob;
 
+    SV** base_cached = (SV**)hv_fetchhek_flags(cache, HvENAME_HEK_NN(stash), HV_FETCH_JUST_SV);
+    /* it may be null, but in such cases we never get to *svp == *base_cached comparison */
+    /* is that true? */
+
     for (STRLEN i = 0; i <= hvmax; ++i) {
         HE* entry;
         for (entry = hvarr[i]; entry; entry = HeNEXT(entry)) {
@@ -129,8 +133,15 @@ reset_stash_cache(pTHX_ HV* stash, shared_keys* keys) {
             /* result is ignored, this call is just to set magic on GvSV, if it's not */
             GV* glob = init_storage_glob(aTHX_ stash, keys);
 
-            /* PL_sv_undef is a placeholder meaning 'walk mro and recalculate cache' */
-            hv_storehek(cache, HvENAME_HEK_NN(stash), &PL_sv_undef);
+            /* PL_sv_undef is a placeholder meaning 'walk up mro and recalculate cache' */
+            SV** svp = (SV**)hv_fetchhek_flags(cache, HvENAME_HEK_NN(stash), HV_FETCH_LVALUE | HV_FETCH_EMPTY_HE | HV_FETCH_JUST_SV);
+            if (*svp == NULL) {
+                *svp = &PL_sv_undef;
+
+            } else if (*svp == *base_cached) {
+                SvREFCNT_dec_NN(*svp);
+                *svp = &PL_sv_undef;
+            }
         }
     }
 
