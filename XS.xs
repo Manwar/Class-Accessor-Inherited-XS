@@ -31,7 +31,7 @@ init_storage_glob(pTHX_ HV* stash, shared_keys* keys) {
 
         if (hent) {
             /* Not sure when this can happen - remains untested */
-            SvREFCNT_inc_simple_NN((SV*)glob);
+            SvREFCNT_inc_NN((SV*)glob);
             SvREFCNT_dec_NN(HeVAL(hent));
             HeVAL(hent) = (SV*)glob;
 
@@ -64,10 +64,13 @@ update_cache(pTHX_ SV* self, HV* cache) {
         (otherwise we won't be here), so ajust counter and iterator to skip over it.
     */
     SSize_t supers_fill = AvFILLp(supers);
+    SSize_t processed   = supers_fill;
     SV** supers_list    = AvARRAY(supers);
 
+    assert(supers_fill > 0); /* if it's zero, than we're in a base accessor class and glob got replaced with placeholder */
+
     SV* cached_glob;
-    while (--supers_fill >= 0) {
+    while (--processed >= 0) {
         SV* elem = *(++supers_list);
 
         if (elem) {
@@ -79,9 +82,24 @@ update_cache(pTHX_ SV* self, HV* cache) {
         }
     }
 
-    assert(cached_glob != &PL_sv_undef);
+    assert(cached_glob != &PL_sv_undef); /* eventually found smth, at least glob in a base accessor class */
 
-    /* and now travel supers list back and write glob to cache, including skipped entry */
+    /*
+        Now travel supers list back and write glob to cache, including first (stash) element.
+        But skip _current_ position, as it's just fetched from cache.
+    */
+
+    supers_fill -= processed;
+    while (--supers_fill >= 0) {
+        SV* elem = *(--supers_list);
+
+        if (elem) {
+            hv_store_ent(cache, elem, cached_glob, 0);
+            SvREFCNT_inc_NN(cached_glob);
+        }
+    }
+
+    assert(supers_list == AvARRAY(supers));
 
     return (GV*)cached_glob;
 }
@@ -109,7 +127,7 @@ reset_stash_cache(pTHX_ HV* stash, shared_keys* keys) {
             HV* stash = gv_stashpvn(HEK_KEY(hek), HEK_LEN(hek), HEK_UTF8(hek) | GV_ADD);
 
             /* result is ignored, this call is just to set magic on GvSV, if it's not */
-            init_storage_glob(aTHX_ stash, keys);
+            GV* glob = init_storage_glob(aTHX_ stash, keys);
 
             /* PL_sv_undef is a placeholder meaning 'walk mro and recalculate cache' */
             hv_storehek(cache, HvENAME_HEK_NN(stash), &PL_sv_undef);
@@ -246,7 +264,7 @@ XS(CAIXS_inherited_accessor)
         HV* stash = GvSTASH(acc_gv);
 
         GV* base_glob = reset_stash_cache(aTHX_ stash, keys);
-        SvREFCNT_inc_simple_NN(base_glob);
+        SvREFCNT_inc_NN(base_glob);
         hv_storehek(cache, HvENAME_HEK_NN(stash), (SV*)base_glob);
     }
 
@@ -272,10 +290,10 @@ XS(CAIXS_inherited_accessor)
         }
 
         assert(GvSV(glob_or_fake));
-        SV* value = GvSV(glob_or_fake);
+        SV* new_value = GvSV(glob_or_fake);
 
         /* use ST(0) instead of all PUSHs ? */
-        PUSHs(value);
+        PUSHs(new_value);
         XSRETURN(1);
     }
 
@@ -293,7 +311,7 @@ XS(CAIXS_inherited_accessor)
 
     } else {
         hv_storehek(cache, HvENAME_HEK_NN(stash), (SV*)glob);
-        SvREFCNT_inc_simple_NN(glob);
+        SvREFCNT_inc_NN(glob);
 
         /* use just GvSV, as it'd be prepared for us by init_storage_glob */
         SV* new_value = GvSVn(glob);
