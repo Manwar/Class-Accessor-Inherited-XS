@@ -45,6 +45,7 @@ init_storage_glob(pTHX_ HV* stash, shared_keys* keys) {
 
     /* gv_SVadd + set magic here or in reset_stash_cache ? */
 
+    if (!GvSV(glob)) gv_SVadd(glob);
     return glob;
 }
 
@@ -111,7 +112,6 @@ reset_stash_cache(pTHX_ HV* stash, shared_keys* keys) {
     /* why fetch&return it? we don't use it -> make it caller's responsibility? */
     /* maybe better return svp_base_cached, so it can be set easily ? */
     GV* base_glob = init_storage_glob(aTHX_ stash, keys);
-    if (!GvSV(base_glob)) gv_SVadd(base_glob); /* it also needs magic */
 
     /* reset base cache entry first */
     SV** svp_base_cached = hv_fetchhek_lval(cache, HvENAME_HEK_NN(stash));
