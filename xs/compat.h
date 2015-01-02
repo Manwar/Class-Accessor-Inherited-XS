@@ -26,7 +26,9 @@
             HV_FETCH_ISSTORE|HV_FETCH_JUST_SV, (val), HEK_HASH(hek))
 #endif
 
-#define hv_fetchhek_ent(hv, hek) ((HE*) hv_fetchhek_flags(hv, hek, 0))
+#define hv_fetchhek_ent(hv, hek) (HE*)hv_fetchhek_flags(hv, hek, 0)
+
+#define hv_fetchhek_lval(hv, hek) (SV**)hv_fetchhek_flags(hv, hek, HV_FETCH_LVALUE | HV_FETCH_EMPTY_HE | HV_FETCH_JUST_SV)
 
 #define hv_fetchhek_flags(hv, hek, flags) \
     hv_common((hv), NULL, HEK_KEY(hek), HEK_LEN(hek), HEK_UTF8(hek), (flags), NULL, HEK_HASH(hek))

@@ -85,7 +85,7 @@ update_cache(pTHX_ SV* self, HV* cache) {
     assert(cached_glob != &PL_sv_undef); /* eventually found smth, at least glob in a base accessor class */
 
     /*
-        Now travel supers list back and write glob to cache, including first (stash) element.
+        Now travel supers list back and write glob to cache, including first element (stash).
         But skip _current_ position, as it's just fetched from cache.
     */
 
@@ -108,9 +108,19 @@ static GV*
 reset_stash_cache(pTHX_ HV* stash, shared_keys* keys) {
     HV* cache = keys->stash_cache;
 
+    /* why fetch&return it? we don't use it -> make it caller's responsibility? */
+    /* maybe better return svp_base_cached, so it can be set easily ? */
     GV* base_glob = init_storage_glob(aTHX_ stash, keys);
     if (!GvSV(base_glob)) gv_SVadd(base_glob); /* it also needs magic */
 
+    /* reset base cache entry first */
+    SV** svp_base_cached = hv_fetchhek_lval(cache, HvENAME_HEK_NN(stash));
+    SV* base_cached = *svp_base_cached;
+    *svp_base_cached = &PL_sv_undef;
+
+    assert(base_cached != &PL_sv_undef); /* useless reset call that'd clear already clear state */
+
+    /* and then clear cache for all our children that have no own info */
     HE* hent = hv_fetchhek_ent(PL_isarev, HvENAME_HEK_NN(stash));
     if (!hent) return base_glob;
 
@@ -120,10 +130,6 @@ reset_stash_cache(pTHX_ HV* stash, shared_keys* keys) {
 
     if (!hvarr) return base_glob;
 
-    SV** base_cached = (SV**)hv_fetchhek_flags(cache, HvENAME_HEK_NN(stash), HV_FETCH_JUST_SV);
-    /* it may be null, but in such cases we never get to *svp == *base_cached comparison */
-    /* is that true? */
-
     for (STRLEN i = 0; i <= hvmax; ++i) {
         HE* entry;
         for (entry = hvarr[i]; entry; entry = HeNEXT(entry)) {
@@ -131,14 +137,22 @@ reset_stash_cache(pTHX_ HV* stash, shared_keys* keys) {
             HV* stash = gv_stashpvn(HEK_KEY(hek), HEK_LEN(hek), HEK_UTF8(hek) | GV_ADD);
 
             /* result is ignored, this call is just to set magic on GvSV, if it's not */
-            GV* glob = init_storage_glob(aTHX_ stash, keys);
+            init_storage_glob(aTHX_ stash, keys);
 
-            /* PL_sv_undef is a placeholder meaning 'walk up mro and recalculate cache' */
-            SV** svp = (SV**)hv_fetchhek_flags(cache, HvENAME_HEK_NN(stash), HV_FETCH_LVALUE | HV_FETCH_EMPTY_HE | HV_FETCH_JUST_SV);
+            SV** svp = hv_fetchhek_lval(cache, HvENAME_HEK_NN(stash));
+            /*
+                *svp can be one of the:
+                  - NULL, empty slot created for us by LVAL - mark it as unused
+                  - &PL_sv_undef, ignore
+                  - glob == base cached glob, clear it
+                  - glob != base cached glob, ignore
+                base_cached can be NULL here, we don't care
+            */
             if (*svp == NULL) {
+                /* PL_sv_undef is a placeholder meaning 'walk up mro and recalculate cache' */
                 *svp = &PL_sv_undef;
 
-            } else if (*svp == *base_cached) {
+            } else if (*svp == base_cached) {
                 SvREFCNT_dec_NN(*svp);
                 *svp = &PL_sv_undef;
             }
@@ -268,34 +282,34 @@ XS(CAIXS_inherited_accessor)
 
     /* Couldn't find value in object, so initiate a package lookup. */
 
+    GV* acc_gv = CvGV(cv);
+    if (!acc_gv) croak("Can't have pkg accessor in anon sub");
+    HV* root_stash = GvSTASH(acc_gv);
+
     HV* cache = keys->stash_cache;
     if (!HvARRAY(cache)) {
-        GV* acc_gv = CvGV(cv);
-        if (!acc_gv) croak("Can't have pkg accessor in anon sub");
-        HV* stash = GvSTASH(acc_gv);
-
-        GV* base_glob = reset_stash_cache(aTHX_ stash, keys);
+        GV* base_glob = reset_stash_cache(aTHX_ root_stash, keys);
         SvREFCNT_inc_NN(base_glob);
-        hv_storehek(cache, HvENAME_HEK_NN(stash), (SV*)base_glob);
+        hv_storehek(cache, HvENAME_HEK_NN(root_stash), (SV*)base_glob);
     }
 
     assert(SvROK(self) || SvPOK(self));
 
+    /* must ensure that the glob hasn't been stolen and replaced with something new */
+
+    HE* hent;
+    if (SvROK(self)) {
+        HV* stash = SvSTASH(SvRV(self));
+        hent = hv_fetchhek_ent(cache, HvENAME_HEK_NN(stash));
+
+    } else {
+        hent = hv_fetch_ent(cache, self, 0, 0);
+    }
+
+    assert(hent);
+    GV* glob_or_fake = (GV*)HeVAL(hent);
+
     if (items == 1) {
-        /* must ensure that the glob hasn't been stolen and replaced with something new */
-
-        HE* hent;
-        if (SvROK(self)) {
-            HV* stash = SvSTASH(SvRV(self));
-            hent = hv_fetchhek_ent(cache, HvENAME_HEK_NN(stash));
-
-        } else {
-            hent = hv_fetch_ent(cache, self, 0, 0);
-        }
-
-        assert(hent);
-        GV* glob_or_fake = (GV*)HeVAL(hent);
-
         if (glob_or_fake == (GV*)&PL_sv_undef) {
             glob_or_fake = update_cache(aTHX_ self, cache);
         }
@@ -311,24 +325,23 @@ XS(CAIXS_inherited_accessor)
     /* set logic */
     HV* stash = SvROK(self) ? SvSTASH(SvRV(self)) : gv_stashsv(self, GV_ADD);
 
-    GV* glob = reset_stash_cache(aTHX_ stash, keys);
+    /* no need to reset cache, if new == old ? at least, for undefs ? */
+    //if (glob_or_fake != (GV*)&PL_sv_undef && GvSTASH(glob_or_fake) != stash) {
+        glob_or_fake = reset_stash_cache(aTHX_ stash, keys);
+    //}
+
     SV* value = ST(1);
 
-    if (!SvOK(value)) {
-        PUSHs(value);
-        /* but if it's root stash - should update cache */
-        /* always update underlying glob */
-        /* and no need to reset cache, if new == old ? at least, for undefs ? */
+    assert(GvSV(glob_or_fake));
+    SV* new_value = GvSV(glob_or_fake);
 
-    } else {
-        hv_storehek(cache, HvENAME_HEK_NN(stash), (SV*)glob);
-        SvREFCNT_inc_NN(glob);
-
-        /* use just GvSV, as it'd be prepared for us by init_storage_glob */
-        SV* new_value = GvSVn(glob);
-        sv_setsv(new_value, value);
-        PUSHs(new_value);
+    if (SvOK(value) || GvSTASH(glob_or_fake) == root_stash) {
+        HeVAL(hent) = (SV*)glob_or_fake;
+        SvREFCNT_inc_NN(glob_or_fake);
     }
+
+    sv_setsv(new_value, value);
+    PUSHs(new_value);
 
     XSRETURN(1);
 }
