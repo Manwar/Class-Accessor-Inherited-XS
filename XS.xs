@@ -317,9 +317,7 @@ XS(CAIXS_inherited_accessor)
         }
 
         assert(GvSV(glob_or_fake));
-        SV* new_value = GvSV(glob_or_fake);
-
-        PUSHs(new_value);
+        PUSHs(GvSV(glob_or_fake));
         XSRETURN(1);
     }
 
@@ -327,22 +325,23 @@ XS(CAIXS_inherited_accessor)
     HV* stash = SvROK(self) ? SvSTASH(SvRV(self)) : gv_stashsv(self, GV_ADD);
     SV* value = ST(1);
 
+    /* all those checks are to reduce number of 'reset_stash_cache' calls */
+
     if (SvOK(value)) {
-        /* this smells of leaks */
-        #define GLOB_TO_CACHE               \
-        SvREFCNT_dec_NN(HeVAL(hent));       \
-        HeVAL(hent) = (SV*)glob_or_fake;    \
-        SvREFCNT_inc_NN((SV*)glob_or_fake);
+        #define SET_CACHE_ENTRY             \
+        SvREFCNT_inc_NN((SV*)glob_or_fake); \
+        HeVAL(hent) = (SV*)glob_or_fake;
 
         if (glob_or_fake != (GV*)&PL_sv_undef) {
             if (GvSTASH(glob_or_fake) != stash) {
                 glob_or_fake = reset_stash_cache(aTHX_ stash, keys);
-                GLOB_TO_CACHE;
+
+                SvREFCNT_dec_NN(HeVAL(hent));
+                SET_CACHE_ENTRY;
             }
         } else {
             glob_or_fake = init_storage_glob(aTHX_ stash, keys);
-            /* no need to dec ref */
-            GLOB_TO_CACHE;
+            SET_CACHE_ENTRY;
         }
 
         assert(GvSV(glob_or_fake));
@@ -354,14 +353,13 @@ XS(CAIXS_inherited_accessor)
 
     } else {
         if (glob_or_fake != (GV*)&PL_sv_undef /* && SvOK(GvSV(glob_or_fake)) */ ) {
+            dROOTSTASH;
             glob_or_fake = reset_stash_cache(aTHX_ stash, keys);
             sv_setsv(GvSV(glob_or_fake), &PL_sv_undef);
 
             /* cache for root must always be valid */
-            dROOTSTASH;
             if (GvSTASH(glob_or_fake) == root_stash) {
-                SvREFCNT_inc_NN((SV*)glob_or_fake);
-                HeVAL(hent) = (SV*)glob_or_fake;
+                SET_CACHE_ENTRY;
             }
         }
 
