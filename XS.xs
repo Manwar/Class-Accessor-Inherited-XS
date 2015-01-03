@@ -282,12 +282,14 @@ XS(CAIXS_inherited_accessor)
 
     /* Couldn't find value in object, so initiate a package lookup. */
 
-    GV* acc_gv = CvGV(cv);
-    if (!acc_gv) croak("Can't have pkg accessor in anon sub");
+    #define dROOTSTASH                                          \
+    GV* acc_gv = CvGV(cv);                                      \
+    if (!acc_gv) croak("Can't have pkg accessor in anon sub");  \
     HV* root_stash = GvSTASH(acc_gv);
 
     HV* cache = keys->stash_cache;
     if (!HvARRAY(cache)) {
+        dROOTSTASH;
         GV* base_glob = reset_stash_cache(aTHX_ root_stash, keys);
         SvREFCNT_inc_NN(base_glob);
         hv_storehek(cache, HvENAME_HEK_NN(root_stash), (SV*)base_glob);
@@ -356,6 +358,7 @@ XS(CAIXS_inherited_accessor)
             sv_setsv(GvSV(glob_or_fake), &PL_sv_undef);
 
             /* cache for root must always be valid */
+            dROOTSTASH;
             if (GvSTASH(glob_or_fake) == root_stash) {
                 SvREFCNT_inc_NN((SV*)glob_or_fake);
                 HeVAL(hent) = (SV*)glob_or_fake;
