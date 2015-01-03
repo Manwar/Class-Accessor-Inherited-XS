@@ -323,26 +323,47 @@ XS(CAIXS_inherited_accessor)
 
     /* set logic */
     HV* stash = SvROK(self) ? SvSTASH(SvRV(self)) : gv_stashsv(self, GV_ADD);
-
-    /* no need to reset cache, if new == old ? at least, for undefs ? */
-    //if (glob_or_fake != (GV*)&PL_sv_undef && GvSTASH(glob_or_fake) != stash) {
-        glob_or_fake = reset_stash_cache(aTHX_ stash, keys);
-    //}
-
     SV* value = ST(1);
 
-    assert(GvSV(glob_or_fake));
-    SV* new_value = GvSV(glob_or_fake);
+    if (SvOK(value)) {
+        /* this smells of leaks */
+        #define GLOB_TO_CACHE               \
+        SvREFCNT_dec_NN(HeVAL(hent));       \
+        HeVAL(hent) = (SV*)glob_or_fake;    \
+        SvREFCNT_inc_NN((SV*)glob_or_fake);
 
-    if (SvOK(value) || GvSTASH(glob_or_fake) == root_stash) {
-        HeVAL(hent) = (SV*)glob_or_fake;
-        SvREFCNT_inc_NN(glob_or_fake);
+        if (glob_or_fake != (GV*)&PL_sv_undef) {
+            if (GvSTASH(glob_or_fake) != stash) {
+                glob_or_fake = reset_stash_cache(aTHX_ stash, keys);
+                GLOB_TO_CACHE;
+            }
+        } else {
+            glob_or_fake = init_storage_glob(aTHX_ stash, keys);
+            /* no need to dec ref */
+            GLOB_TO_CACHE;
+        }
+
+        assert(GvSV(glob_or_fake));
+        SV* new_value = GvSV(glob_or_fake);
+
+        sv_setsv(new_value, value);
+        PUSHs(new_value);
+        XSRETURN(1);
+
+    } else {
+        if (glob_or_fake != (GV*)&PL_sv_undef /* && SvOK(GvSV(glob_or_fake)) */ ) {
+            glob_or_fake = reset_stash_cache(aTHX_ stash, keys);
+            sv_setsv(GvSV(glob_or_fake), &PL_sv_undef);
+
+            /* cache for root must always be valid */
+            if (GvSTASH(glob_or_fake) == root_stash) {
+                SvREFCNT_inc_NN((SV*)glob_or_fake);
+                HeVAL(hent) = (SV*)glob_or_fake;
+            }
+        }
+
+        XSRETURN_UNDEF;
     }
-
-    sv_setsv(new_value, value);
-    PUSHs(new_value);
-
-    XSRETURN(1);
 }
 
 MODULE = Class::Accessor::Inherited::XS		PACKAGE = Class::Accessor::Inherited::XS
