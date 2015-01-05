@@ -32,4 +32,8 @@ Test->foo(70);
 @Test::F::ISA = qw/Test::B/;
 is(Test::F->foo, 70);
 
+is(Test->foo(99), 99);
+push @Test::ISA, 'NOP';
+is(Test->foo, 99);
+
 done_testing;
