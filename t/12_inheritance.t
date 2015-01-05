@@ -16,7 +16,9 @@ is(Test::B->foo, 12);
 @Test::B::ISA = qw/Test/;
 is(Test::B->foo, undef);
 
+@Test::E::ISA = qw/Test::D/;
 @Test::D::ISA = qw/Test::A/;
+is(Test::E->foo, 12);
 is(Test::D->foo, 12);
 
 Test->foo(undef);
@@ -27,7 +29,7 @@ is(Test::C->foo(42), 42);
 is(Test::A->foo, 42);
 
 Test->foo(70);
-@Test::E::ISA = qw/Test::B/;
-is(Test::E->foo, 70);
+@Test::F::ISA = qw/Test::B/;
+is(Test::F->foo, 70);
 
 done_testing;
