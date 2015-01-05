@@ -57,3 +57,9 @@ no_leaks_ok {
 no_leaks_ok {
     Jopa->foobaz;
 };
+
+no_leaks_ok {
+    Jopa->mk_inherited_accessors("foobar");
+    Jopa->foobar(12);
+    undef *Jopa::foobar;
+}
