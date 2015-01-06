@@ -9,6 +9,14 @@
 
 #include "xs/compat.h"
 
+#ifdef NDEBUG
+#define debug(...)
+#else
+#define debug warn
+#endif
+
+#define dKEYS_FROM_AV(keys_av) shared_keys* keys = (shared_keys*)AvARRAY(keys_av);
+
 static MGVTBL sv_payload_marker;
 static bool optimize_entersub = 1;
 
@@ -18,6 +26,30 @@ typedef struct shared_keys {
     HV* stash_cache;
 } shared_keys;
 #define SHARED_LAST_IDX 2
+
+static int wipe_cache(pTHX_ SV* sv, MAGIC* mg);
+static MGVTBL isa_changer_marker = {
+    0, wipe_cache, 0, wipe_cache, 0, 0, 0, 0
+};
+
+static void
+add_isa_hook(pTHX_ HV* stash, AV* keys_av) {
+    dKEYS_FROM_AV(keys_av);
+
+    SV** svp = hv_fetch(stash, "ISA", 3, 0);    /* static "ISA"-holding SV */
+    if (!svp) {
+        warn("No @ISA for stash %s", HvENAME(stash));
+        return; /* assert for root stash */
+    }
+
+    GV* isa_gv = (GV*)*svp;
+    assert(GvAV(isa_gv));   /* what of our parent, huh? */
+
+    debug("add_ISA_hook: %s", HvENAME(stash));
+
+    MAGIC* mg = sv_magicext((SV*)GvAV(isa_gv), (SV*)keys_av, PERL_MAGIC_ext, &isa_changer_marker, (const char*)stash, HEf_SVKEY);
+    SvREFCNT_dec_NN((SV*)keys_av);
+}
 
 static GV*
 init_storage_glob(pTHX_ HV* stash, shared_keys* keys) {
@@ -49,8 +81,8 @@ init_storage_glob(pTHX_ HV* stash, shared_keys* keys) {
     return glob;
 }
 
-static GV*
-update_cache(pTHX_ SV* self, HV* cache) {
+static HE*
+update_cache(pTHX_ SV* self, HV* cache, AV* keys_av) {
     HV* stash;
     if (SvROK(self)) {
         stash = SvSTASH(SvRV(self));
@@ -59,6 +91,8 @@ update_cache(pTHX_ SV* self, HV* cache) {
     }
 
     assert(stash);
+    debug("update_cache: %s", HvENAME(stash));
+
     AV* supers = mro_get_linear_isa(stash);
     /*
         First entry in 'mro_get_linear_isa' list is a 'stash' itself. It's already been tested
@@ -71,15 +105,20 @@ update_cache(pTHX_ SV* self, HV* cache) {
     assert(supers_fill > 0); /* if it's zero, than we're in a base accessor class and glob got replaced with a placeholder */
 
     SV* cached_glob;
+    HE* cached_hent;
     while (--processed >= 0) {
         SV* elem = *(++supers_list);
 
         if (elem) {
-            HE* hent = hv_fetch_ent(cache, elem, 0, 0);
-            assert(hent); /* cache is correctly filled */
+            cached_hent = hv_fetch_ent(cache, elem, 0, 0);
 
-            cached_glob = HeVAL(hent);
-            if (cached_glob != &PL_sv_undef) break;
+            if (!cached_hent) continue; /* added smth new into @ISA */
+
+            cached_glob = HeVAL(cached_hent);
+            if (cached_glob != &PL_sv_undef) {
+                debug("update_cache: picked %s", SvPV_nolen(elem));
+                break;
+            }
         }
     }
 
@@ -91,10 +130,12 @@ update_cache(pTHX_ SV* self, HV* cache) {
     */
 
     supers_fill -= processed;
+    add_isa_hook(aTHX_ gv_stashsv(*supers_list, GV_ADD), keys_av);  /* if !exists */
     while (--supers_fill >= 0) {
         SV* elem = *(--supers_list);
 
         if (elem) {
+            add_isa_hook(aTHX_ gv_stashsv(elem, GV_ADD), keys_av);  /* if !exists */
             hv_store_ent(cache, elem, cached_glob, 0);
             SvREFCNT_inc_NN(cached_glob);
         }
@@ -102,7 +143,7 @@ update_cache(pTHX_ SV* self, HV* cache) {
 
     assert(supers_list == AvARRAY(supers));
 
-    return (GV*)cached_glob;
+    return cached_hent;
 }
 
 static GV*
@@ -118,6 +159,10 @@ reset_stash_cache(pTHX_ HV* stash, shared_keys* keys) {
     SV* base_cached = *svp_base_cached;
     *svp_base_cached = &PL_sv_undef;
 
+    if (base_cached == &PL_sv_undef) {
+        debug("Useless reset_stash_cache %s", HvENAME(stash));
+        return base_glob;
+    }
     assert(base_cached != &PL_sv_undef); /* useless reset call that'd clear already clear state */
 
     /* and then clear cache for all our children that have no own info */
@@ -162,6 +207,18 @@ reset_stash_cache(pTHX_ HV* stash, shared_keys* keys) {
     return base_glob;
 }
 
+static int
+wipe_cache(pTHX_ SV* sv, MAGIC* mg) {
+    dKEYS_FROM_AV((AV*)(mg->mg_obj));
+
+    debug("C_wipe_cache: %s", HvENAME((HV*)(mg->mg_ptr)));
+    assert(HvARRAY(keys->stash_cache)); /* no magic prior to 1st acc call */
+
+    reset_stash_cache(aTHX_ (HV*)(mg->mg_ptr), keys);
+
+    return 0;
+}
+
 XS(CAIXS_inherited_accessor);
 
 static void
@@ -191,7 +248,7 @@ CAIXS_install_accessor(pTHX_ SV* full_name, SV* hash_key, SV* pkg_key)
     keys_array[2] = (SV*)newHV();
 
 #ifndef MULTIPLICITY
-    CvXSUBANY(cv).any_ptr = (void*)keys_array;
+    CvXSUBANY(cv).any_ptr = (void*)keys_av;
 #endif
 
     sv_magicext((SV*)cv, (SV*)keys_av, PERL_MAGIC_ext, &sv_payload_marker, NULL, 0);
@@ -238,11 +295,11 @@ XS(CAIXS_inherited_accessor)
         op->op_ppaddr = CAIXS_entersub;
     }
 
-    shared_keys* keys;
+    AV* keys_av;
 #ifndef MULTIPLICITY
     /* Blessed are ye and get a fastpath */
-    keys = (shared_keys*)(CvXSUBANY(cv).any_ptr);
-    if (!keys) croak("Can't find hash key information");
+    keys_av = (AV*)(CvXSUBANY(cv).any_ptr);
+    if (!keys_av) croak("Can't find hash key information");
 #else
     /*
         We can't look into CvXSUBANY under threads, as it would have been written in the parent thread
@@ -252,8 +309,9 @@ XS(CAIXS_inherited_accessor)
     MAGIC* mg = mg_findext((SV*)cv, PERL_MAGIC_ext, &sv_payload_marker);
     if (!mg) croak("Can't find hash key information");
 
-    keys = (shared_keys*)AvARRAY((AV*)(mg->mg_obj));
+    keys_av = (AV*)(mg->mg_obj);
 #endif
+    dKEYS_FROM_AV(keys_av);
 
     SV* self = ST(0);
     if (SvROK(self)) {
@@ -293,6 +351,8 @@ XS(CAIXS_inherited_accessor)
         GV* base_glob = reset_stash_cache(aTHX_ root_stash, keys);
         SvREFCNT_inc_NN(base_glob);
         hv_storehek(cache, HvENAME_HEK_NN(root_stash), (SV*)base_glob);
+
+        add_isa_hook(aTHX_ root_stash, keys_av); /* assert !exists */
     }
 
     assert(SvROK(self) || SvPOK(self));
@@ -308,12 +368,19 @@ XS(CAIXS_inherited_accessor)
         hent = hv_fetch_ent(cache, self, 0, 0);
     }
 
-    assert(hent);
+    if (!hent) {
+        debug("no hent, perform update_cache");
+        /* new element in inheritance chain? */
+        hent = update_cache(aTHX_ self, cache, keys_av);
+        if (!hent) croak("Tried to call inherited accessor outside of root inheritance chain");
+    }
+
     GV* glob_or_fake = (GV*)HeVAL(hent);
 
     if (items == 1) {
         if (glob_or_fake == (GV*)&PL_sv_undef) {
-            glob_or_fake = update_cache(aTHX_ self, cache);
+            hent = update_cache(aTHX_ self, cache, keys_av);
+            glob_or_fake = (GV*)HeVAL(hent);
         }
 
         assert(GvSV(glob_or_fake));
