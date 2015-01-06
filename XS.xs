@@ -171,7 +171,7 @@ reset_stash_cache(pTHX_ HV* stash, shared_keys* keys) {
     /* reset base cache entry first */
     SV** svp_base_cached = hv_fetchhek_lval(cache, HvENAME_HEK_NN(stash));
     SV* base_cached = *svp_base_cached;
-    *svp_base_cached = &PL_sv_undef;
+    *svp_base_cached = &PL_sv_undef; /* need SvREFCNT_dec ? */
 
     if (base_cached == &PL_sv_undef) {
         debug("Useless reset_stash_cache %s", HvENAME(stash));
@@ -207,7 +207,7 @@ reset_stash_cache(pTHX_ HV* stash, shared_keys* keys) {
                   - glob != base cached glob, ignore
                 base_cached can be NULL here, we don't care
             */
-            if (*svp == NULL) {
+            if (*svp == NULL) { /* order is important not to get NULL in NN call */
                 /* PL_sv_undef is a placeholder meaning 'walk up mro and recalculate cache' */
                 *svp = &PL_sv_undef;
 
