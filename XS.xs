@@ -15,7 +15,7 @@
 #define debug warn
 #endif
 
-#define dKEYS_FROM_AV(keys_av) shared_keys* keys = (shared_keys*)AvARRAY(keys_av);
+#define KEYS_FROM_AV(keys_av) shared_keys* keys = (shared_keys*)AvARRAY(keys_av);
 
 static MGVTBL sv_payload_marker;
 static bool optimize_entersub = 1;
@@ -24,17 +24,25 @@ typedef struct shared_keys {
     SV* hash_key;
     SV* pkg_key;
     HV* stash_cache;
+    HV* mg_backref;
 } shared_keys;
-#define SHARED_LAST_IDX 2
+#define SHARED_LAST_IDX 3
 
 static int wipe_cache(pTHX_ SV* sv, MAGIC* mg);
 static MGVTBL isa_changer_marker = {
-    0, wipe_cache, 0, wipe_cache, 0, 0, 0, 0
+    0, wipe_cache, 0, wipe_cache, wipe_cache, 0, 0, 0
 };
 
 static void
-add_isa_hook(pTHX_ HV* stash, AV* keys_av) {
-    dKEYS_FROM_AV(keys_av);
+add_isa_hook_stash(pTHX_ HV* stash, AV* keys_av) {
+    KEYS_FROM_AV(keys_av);
+
+    assert(stash);
+    SV** backref_slot = hv_fetchhek_lval(keys->mg_backref, HvENAME_HEK_NN(stash));
+    if (*backref_slot) return;
+
+    *backref_slot = (SV*)stash;
+    SvREFCNT_inc_NN((SV*)stash);
 
     SV** svp = hv_fetch(stash, "ISA", 3, 0);    /* static "ISA"-holding SV */
     if (!svp) {
@@ -47,8 +55,13 @@ add_isa_hook(pTHX_ HV* stash, AV* keys_av) {
 
     debug("add_ISA_hook: %s", HvENAME(stash));
 
-    MAGIC* mg = sv_magicext((SV*)GvAV(isa_gv), (SV*)keys_av, PERL_MAGIC_ext, &isa_changer_marker, (const char*)stash, HEf_SVKEY);
+    sv_magicext((SV*)GvAV(isa_gv), (SV*)keys_av, PERL_MAGIC_ext, &isa_changer_marker, (const char*)stash, HEf_SVKEY);
     SvREFCNT_dec_NN((SV*)keys_av);
+}
+
+static inline void
+add_isa_hook_sv(pTHX_ SV* stash_name, AV* keys_av) {
+    add_isa_hook_stash(aTHX_ gv_stashsv(stash_name, 0), keys_av);
 }
 
 static GV*
@@ -126,16 +139,17 @@ update_cache(pTHX_ SV* self, HV* cache, AV* keys_av) {
 
     /*
         Now travel supers list back and write glob to cache, including first element (stash).
-        But skip _current_ position, as it's just fetched from cache.
+        But skip _current_ position, as it's just fetched from cache (except for the @ISA hook,
+        which has to be set for it too).
     */
 
     supers_fill -= processed;
-    add_isa_hook(aTHX_ gv_stashsv(*supers_list, GV_ADD), keys_av);  /* if !exists */
+    add_isa_hook_sv(aTHX_ *supers_list, keys_av);
     while (--supers_fill >= 0) {
         SV* elem = *(--supers_list);
 
         if (elem) {
-            add_isa_hook(aTHX_ gv_stashsv(elem, GV_ADD), keys_av);  /* if !exists */
+            add_isa_hook_sv(aTHX_ elem, keys_av);
             hv_store_ent(cache, elem, cached_glob, 0);
             SvREFCNT_inc_NN(cached_glob);
         }
@@ -209,7 +223,9 @@ reset_stash_cache(pTHX_ HV* stash, shared_keys* keys) {
 
 static int
 wipe_cache(pTHX_ SV* sv, MAGIC* mg) {
-    dKEYS_FROM_AV((AV*)(mg->mg_obj));
+    KEYS_FROM_AV((AV*)(mg->mg_obj));
+
+    if (PL_phase == PERL_PHASE_DESTRUCT) return 0;
 
     debug("C_wipe_cache: %s", HvENAME((HV*)(mg->mg_ptr)));
     assert(HvARRAY(keys->stash_cache)); /* no magic prior to 1st acc call */
@@ -246,6 +262,7 @@ CAIXS_install_accessor(pTHX_ SV* full_name, SV* hash_key, SV* pkg_key)
     keys_array[0] = s_hash_key;
     keys_array[1] = s_pkg_key;
     keys_array[2] = (SV*)newHV();
+    keys_array[3] = (SV*)newHV();
 
 #ifndef MULTIPLICITY
     CvXSUBANY(cv).any_ptr = (void*)keys_av;
@@ -311,7 +328,7 @@ XS(CAIXS_inherited_accessor)
 
     keys_av = (AV*)(mg->mg_obj);
 #endif
-    dKEYS_FROM_AV(keys_av);
+    KEYS_FROM_AV(keys_av);
 
     SV* self = ST(0);
     if (SvROK(self)) {
@@ -352,7 +369,8 @@ XS(CAIXS_inherited_accessor)
         SvREFCNT_inc_NN(base_glob);
         hv_storehek(cache, HvENAME_HEK_NN(root_stash), (SV*)base_glob);
 
-        add_isa_hook(aTHX_ root_stash, keys_av); /* assert !exists */
+        assert(!hv_fetchhek_flags(keys->mg_backref, HvENAME_HEK_NN(root_stash), HV_FETCH_ISEXISTS));
+        add_isa_hook_stash(aTHX_ root_stash, keys_av);
     }
 
     assert(SvROK(self) || SvPOK(self));
