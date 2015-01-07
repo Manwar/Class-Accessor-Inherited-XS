@@ -45,10 +45,7 @@ add_isa_hook_stash(pTHX_ HV* stash, AV* keys_av) {
     SvREFCNT_inc_NN((SV*)stash);
 
     SV** svp = hv_fetch(stash, "ISA", 3, 0);    /* static "ISA"-holding SV */
-    if (!svp) {
-        warn("No @ISA for stash %s", HvENAME(stash));
-        return; /* assert for root stash */
-    }
+    if (!svp) return; /* assert for root stash ? */
 
     GV* isa_gv = (GV*)*svp;
     assert(GvAV(isa_gv));   /* what of our parent, huh? */
