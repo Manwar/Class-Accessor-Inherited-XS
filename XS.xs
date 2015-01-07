@@ -100,10 +100,10 @@ update_cache(pTHX_ SV* self, HV* cache, AV* keys_av) {
     if (SvROK(self)) {
         stash = SvSTASH(SvRV(self));
     } else {
-        stash = gv_stashsv(self, GV_ADD);
+        stash = gv_stashsv(self, 0);
     }
 
-    assert(stash);
+    if (!stash) return NULL; /* anything that might have accessor is either root or has @ISA */
     debug("update_cache: %s", HvENAME(stash));
 
     AV* supers = mro_get_linear_isa(stash);
@@ -115,7 +115,7 @@ update_cache(pTHX_ SV* self, HV* cache, AV* keys_av) {
     SSize_t processed   = supers_fill;
     SV** supers_list    = AvARRAY(supers);
 
-    assert(supers_fill > 0); /* if it's zero, than we're in a base accessor class and glob got replaced with a placeholder */
+    if (!supers_fill) return NULL; /* has stash, but no parents and isn't root (as root never looses cache glob) */
 
     SV* cached_glob;
     HE* cached_hent;
@@ -135,7 +135,7 @@ update_cache(pTHX_ SV* self, HV* cache, AV* keys_av) {
         }
     }
 
-    assert(cached_glob != &PL_sv_undef); /* eventually found smth, at least glob from the base accessor class */
+    if (cached_glob == &PL_sv_undef) return NULL; /* haven't found root amoung parents */
 
     /*
         Now travel supers list back and write glob to cache, including first element (stash).
@@ -373,8 +373,6 @@ XS(CAIXS_inherited_accessor)
         add_isa_hook_stash(aTHX_ root_stash, keys_av);
     }
 
-    assert(SvROK(self) || SvPOK(self));
-
     /* must ensure that the glob hasn't been stolen and replaced with something new */
 
     HE* hent;
@@ -398,6 +396,7 @@ XS(CAIXS_inherited_accessor)
     if (items == 1) {
         if (glob_or_fake == (GV*)&PL_sv_undef) {
             hent = update_cache(aTHX_ self, cache, keys_av);
+            assert(hent);
             glob_or_fake = (GV*)HeVAL(hent);
         }
 

@@ -27,7 +27,9 @@ like exception {$scalarobj->foo}, qr/hash-based/;
 
 like exception {Jopa::foo(12)},        qr/outside of root/;
 like exception {Jopa::foo('Jopa::A')}, qr/outside of root/;
-like exception {Jopa::foo('Jopa::A')}, qr/outside of root/;
+
+@Jopa::B::ISA=qw/Jopa::A/;
+like exception {Jopa::foo('Jopa::B')}, qr/outside of root/;
 
 is(Jopa->foo(42), 42);
 is(Jopa::foo('Jopa'), 42);
