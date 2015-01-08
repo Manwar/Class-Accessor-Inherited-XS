@@ -24,7 +24,7 @@ typedef struct shared_keys {
     SV* hash_key;
     SV* pkg_key;
     HV* stash_cache;
-    HV* mg_backref;
+    SV* mg_backref;
 } shared_keys;
 #define SHARED_LAST_IDX 3
 
@@ -38,7 +38,7 @@ add_isa_hook_stash(pTHX_ HV* stash, AV* keys_av) {
     KEYS_FROM_AV(keys_av);
 
     assert(stash);
-    SV** backref_slot = hv_fetchhek_lval(keys->mg_backref, HvENAME_HEK_NN(stash));
+    SV** backref_slot = hv_fetchhek_lval((HV*)SvRV(keys->mg_backref), HvENAME_HEK_NN(stash));
     if (*backref_slot) return;
 
     *backref_slot = (SV*)stash;
@@ -52,8 +52,10 @@ add_isa_hook_stash(pTHX_ HV* stash, AV* keys_av) {
 
     debug("add_ISA_hook: %s", HvENAME(stash));
 
-    sv_magicext((SV*)GvAV(isa_gv), (SV*)keys_av, PERL_MAGIC_ext, &isa_changer_marker, (const char*)stash, HEf_SVKEY);
+    MAGIC* mg = sv_magicext((SV*)GvAV(isa_gv), (SV*)keys_av, PERL_MAGIC_ext, &isa_changer_marker, (const char*)stash, HEf_SVKEY);
     SvREFCNT_dec_NN((SV*)keys_av);
+    /* this somehow leads to double-free, so drop refcounting flag also  */
+    mg->mg_flags &= ~MGf_REFCOUNTED;
 }
 
 static inline void
@@ -259,7 +261,11 @@ CAIXS_install_accessor(pTHX_ SV* full_name, SV* hash_key, SV* pkg_key)
     keys_array[0] = s_hash_key;
     keys_array[1] = s_pkg_key;
     keys_array[2] = (SV*)newHV();
-    keys_array[3] = (SV*)newHV();
+
+    /* add stash cache ? */
+    HV* mg_backref = newHV();
+    keys_array[3] = newRV_noinc((SV*)mg_backref);
+    sv_bless(keys_array[3], gv_stashpvn("Class::Accessor::Inherited::XS::D", 33, 0));
 
 #ifndef MULTIPLICITY
     CvXSUBANY(cv).any_ptr = (void*)keys_av;
@@ -366,7 +372,7 @@ XS(CAIXS_inherited_accessor)
         SvREFCNT_inc_NN(base_glob);
         hv_storehek(cache, HvENAME_HEK_NN(root_stash), (SV*)base_glob);
 
-        assert(!hv_fetchhek_flags(keys->mg_backref, HvENAME_HEK_NN(root_stash), HV_FETCH_ISEXISTS));
+        assert(!hv_fetchhek_flags((HV*)SvRV(keys->mg_backref), HvENAME_HEK_NN(root_stash), HV_FETCH_ISEXISTS));
         add_isa_hook_stash(aTHX_ root_stash, keys_av);
     }
 
@@ -463,5 +469,40 @@ PPCODE:
 {
     CAIXS_install_accessor(aTHX_ full_name, hash_key, pkg_key);
     XSRETURN_UNDEF;
+}
+
+MODULE = Class::Accessor::Inherited::XS PACKAGE = Class::Accessor::Inherited::XS::D
+PROTOTYPES: DISABLE
+
+void
+DESTROY(SV* THIS)
+PPCODE:
+{
+    /* THIS here is a mg_backref element from shared_keys struct */
+
+    if (PL_phase == PERL_PHASE_DESTRUCT) XSRETURN(0);
+
+    HV* mg_backref = (HV*)SvRV(THIS);
+    STRLEN hvmax = HvMAX(mg_backref);
+    HE** hvarr   = HvARRAY(mg_backref);
+    if (!hvarr)  return;
+
+    for (STRLEN i = 0; i <= hvmax; ++i) {
+        HE* entry;
+        for (entry = hvarr[i]; entry; entry = HeNEXT(entry)) {
+            HV* stash = (HV*)HeVAL(entry);
+            assert(stash);
+
+            SV** svp = hv_fetch(stash, "ISA", 3, 0);
+            assert(svp);
+
+            GV* isa_gv = (GV*)*svp;
+            assert(GvAV(isa_gv));
+
+            sv_unmagicext((SV*)GvAV(isa_gv), PERL_MAGIC_ext, &isa_changer_marker);
+        }
+    }
+
+    XSRETURN(0);
 }
 
